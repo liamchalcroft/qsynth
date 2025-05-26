@@ -1,7 +1,6 @@
 <div align="center">
 
 # Domain-Agnostic Stroke Lesion Segmentation Using Physics-Constrained Synthetic Data
-## Using Physics-Constrained Synthetic Data
 
 [![Paper](https://img.shields.io/badge/MICCAI-2025-blue.svg)](https://miccai2025.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
