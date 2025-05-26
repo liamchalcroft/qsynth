@@ -1,11 +1,9 @@
 import monai as mn
 import glob
 import os
-from monai.networks.nets import UNet
 import torch
 import numpy as np
 from tqdm import tqdm
-import argparse
 import pandas as pd
 from scipy import ndimage
 import warnings

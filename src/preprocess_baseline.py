@@ -2,8 +2,6 @@ import monai as mn
 import glob
 import os
 from torch.utils.data import DataLoader
-import torch
-import numpy as np
 from random import shuffle, seed
 import custom_cc
 import custom

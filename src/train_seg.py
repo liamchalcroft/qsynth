@@ -945,40 +945,6 @@ def set_up():
 def main():
     args, device, train_loader, val_loader = set_up()
     if args.debug:
-    #     saver1 = mn.transforms.SaveImage(
-    #         output_dir=os.path.join(args.logdir, args.name, "debug-val"),
-    #         output_postfix="img",
-    #         separate_folder=False,
-    #     )
-    #     saver2 = mn.transforms.SaveImage(
-    #         output_dir=os.path.join(args.logdir, args.name, "debug-val"),
-    #         output_postfix="label",
-    #         separate_folder=False,
-    #     )
-    #     for i, batch in enumerate(val_loader):
-    #         if i > 9:
-    #             break
-    #         else:
-    #             print(
-    #                 "Image: ",
-    #                 batch["image"].shape,
-    #                 "min={}".format(batch["image"].min()),
-    #                 "max={}".format(batch["image"].max()),
-    #             )
-    #             print(
-    #                 "seg: ",
-    #                 batch["seg"].shape,
-    #                 "min={}".format(batch["seg"].min()),
-    #                 "max={}".format(batch["seg"].max()),
-    #             )
-    #             saver1(
-    #                 torch.Tensor(batch["image"][0].cpu().float()),
-    #             )
-    #             saver2(
-    #                 torch.Tensor(
-    #                     torch.argmax(batch["seg"][0], dim=0)[None].cpu().float()
-    #                 ),
-    #             )
         saver1 = mn.transforms.SaveImage(
             output_dir=os.path.join(args.logdir, args.name, "debug-train"),
             output_postfix="img",

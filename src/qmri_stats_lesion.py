@@ -1,6 +1,5 @@
 import nibabel as nb
 import torch
-import cornucopia as cc
 import pandas as pd
 import os
 import glob

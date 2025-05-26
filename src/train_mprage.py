@@ -1,9 +1,7 @@
 import glob
 import os
 
-# from monai.networks.nets import UNet
 from model import UNet
-from monai import transforms
 from generative.metrics import SSIMMetric
 from generative.losses import PerceptualLoss
 from torch.utils.data import DataLoader
@@ -17,10 +15,7 @@ import custom_cc
 
 import wandb
 import argparse
-import random
-from torchinfo import summary
 from torch.optim.lr_scheduler import LambdaLR
-import hyperlight as hl
 from contextlib import nullcontext
 from torchvision.utils import make_grid
 import logging

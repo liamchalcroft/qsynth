@@ -9,7 +9,6 @@ from fsl.wrappers import flirt, bet
 import numpy as np
 from tqdm import tqdm
 import argparse
-import nibabel as nib
 
 
 def clip_ct(img):

@@ -1,0 +1,12 @@
+torch
+monai
+numpy
+pandas
+scipy
+tqdm
+wandb
+cc3d
+cornucopia
+nibabel
+fslpy
+git+https://github.com/balbasty/nitorch#egg=nitorch[all]
