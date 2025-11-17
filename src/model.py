@@ -293,10 +293,24 @@ class UNet(nn.Module):
 
         if self.upsample == "subpixel":
             up_mode = "pixelshuffle"
+            from monai.networks.layers.convutils import same_padding
+            from monai.networks.layers.factories import Conv
+
+            conv_out_channels = out_channels * (strides ** self.dimensions)
+            pre_conv = Conv[Conv.CONV, self.dimensions](
+                in_channels=in_channels,
+                out_channels=conv_out_channels,
+                kernel_size=1,
+                stride=1,
+                padding=0,
+                bias=self.bias,
+            )
         elif self.upsample == "transpose":
             up_mode = "deconv"
+            pre_conv = "default"
         elif self.upsample == "interp":
             up_mode = "nontrainable"
+            pre_conv = "default"
 
         up = Upsample(
             self.dimensions,
@@ -305,6 +319,7 @@ class UNet(nn.Module):
             scale_factor=strides,
             kernel_size=self.up_kernel_size,
             mode=up_mode,
+            pre_conv=pre_conv,
             bias=self.bias,
             interp_mode="nearest",
             align_corners=None,

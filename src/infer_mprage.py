@@ -46,6 +46,7 @@ def run_model(args, device):
             checkpoint["epoch"], checkpoint["wandb"]
         )
     )
+
     model.load_state_dict(checkpoint["net"])
     model.eval()
 
@@ -107,6 +108,7 @@ def run_model(args, device):
 
     get_mask = mn.transforms.Compose(
         transforms=[
+            mn.transforms.Lambda(func=lambda x: torch.nan_to_num(x, nan=0.0)),
             mn.transforms.GaussianSmooth(sigma=11),
             mn.transforms.ForegroundMask(threshold="otsu", invert=True),
             mn.transforms.FillHoles(),
@@ -116,6 +118,7 @@ def run_model(args, device):
 
     preproc = mn.transforms.Compose(
         transforms=[
+            mn.transforms.LambdaD(keys=["img"], func=lambda x: torch.nan_to_num(x, nan=0.0)),
             mn.transforms.SpacingD(keys=["img"], pixdim=args.pixdim),
             mn.transforms.ScaleIntensityRangePercentilesD(
                 keys=["img"],
@@ -152,7 +155,9 @@ def run_model(args, device):
         #     inverted_pred = preproc.inverse(pred_dict)
         # pred = inverted_pred["img"]
         pred = activate(pred[None])[0]
-        # pred = mask * pred
+
+        if args.apply_mask:
+            pred = mask * pred
 
         print("Prediction complete. Saving parameter maps...")
         mn.transforms.SaveImage(
@@ -198,6 +203,11 @@ def run_model(args, device):
 
         print("Parameter maps saved. Predicting simulated MPRAGE from parameters...")
         mprage_ = mprage(pred[0], pred[1], pred[2], device=device)
+        mprage_ = torch.nan_to_num(mprage_, nan=0.0)
+
+        if args.apply_mask:
+            mprage_ = mask[0] * mprage_
+
         mn.transforms.SaveImage(
             output_dir=args.savedir,
             output_postfix="sim_mprage",
@@ -238,6 +248,12 @@ def set_up():
         default="transpose",
         type=str,
         help="Method of upsampling. Options: ['transpose', 'subpixel', 'interp'].",
+    )
+    parser.add_argument(
+        "--apply_mask",
+        default=False,
+        action="store_true",
+        help="Apply foreground mask to output parameter maps and simulated MPRAGE.",
     )
     args = parser.parse_args()
 

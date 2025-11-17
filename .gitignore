@@ -46,4 +46,7 @@ venv/
 logs/
 *.pt
 checkpoints/
-wandb/ 
+wandb/
+
+# Model weights and test outputs
+weights/
