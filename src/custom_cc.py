@@ -5,6 +5,7 @@ import monai as mn
 import typing as tp
 from copy import deepcopy
 import json
+import os
 from nitorch.tools import qmri
 import pandas as pd
 from scipy.stats import median_abs_deviation
@@ -75,26 +76,39 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="pandas")
 # df['mu'] = pd.to_numeric(df['mu'])
 # df['std'] = pd.to_numeric(df['std'])
 
-df_mb = pd.read_csv("./tissue_stats.csv")
-df_freesurfer = pd.read_csv("./tissue_stats_freesurfer.csv")
+# Load tissue statistics CSVs
+# These are only needed when use_real_mpms=False (for synthetic GMM generation)
+# Try to load them, but don't fail if they're missing
+try:
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    df_mb = pd.read_csv(os.path.join(_script_dir, "tissue_stats.csv"))
+    df_freesurfer = pd.read_csv(os.path.join(_script_dir, "tissue_stats_freesurfer.csv"))
+    df_lesion = pd.read_csv(os.path.join(_script_dir, "lesion_stats.csv"))
 
-df_lesion = pd.read_csv("./lesion_stats.csv")
+    # Only print if in debug/development mode
+    if os.getenv("DEBUG_TISSUE_STATS"):
+        print("PD")
+        print(df_mb[df_mb["Modality"] == "PD"].groupby("Label")["mu"].mean())
+        print(df_lesion[df_lesion["Modality"] == "PD"].groupby("Label")["mu"].mean())
 
-print("PD")
-print(df_mb[df_mb["Modality"] == "PD"].groupby("Label")["mu"].mean())
-print(df_lesion[df_lesion["Modality"] == "PD"].groupby("Label")["mu"].mean())
+        print("R1")
+        print(df_mb[df_mb["Modality"] == "R1"].groupby("Label")["mu"].mean())
+        print(df_lesion[df_lesion["Modality"] == "R1"].groupby("Label")["mu"].mean())
 
-print("R1")
-print(df_mb[df_mb["Modality"] == "R1"].groupby("Label")["mu"].mean())
-print(df_lesion[df_lesion["Modality"] == "R1"].groupby("Label")["mu"].mean())
+        print("R2s_OLS")
+        print(df_mb[df_mb["Modality"] == "R2s_OLS"].groupby("Label")["mu"].mean())
+        print(df_lesion[df_lesion["Modality"] == "R2s_OLS"].groupby("Label")["mu"].mean())
 
-print("R2s_OLS")
-print(df_mb[df_mb["Modality"] == "R2s_OLS"].groupby("Label")["mu"].mean())
-print(df_lesion[df_lesion["Modality"] == "R2s_OLS"].groupby("Label")["mu"].mean())
-
-print("MT")
-print(df_mb[df_mb["Modality"] == "MT"].groupby("Label")["mu"].mean())
-print(df_lesion[df_lesion["Modality"] == "MT"].groupby("Label")["mu"].mean())
+        print("MT")
+        print(df_mb[df_mb["Modality"] == "MT"].groupby("Label")["mu"].mean())
+        print(df_lesion[df_lesion["Modality"] == "MT"].groupby("Label")["mu"].mean())
+except FileNotFoundError as e:
+    # CSVs not found - create empty dataframes
+    # These will only be used if use_real_mpms=False, which will then fail with a clear error
+    warnings.warn(f"Tissue stats CSVs not found: {e}. This is OK if using use_real_mpms=True.")
+    df_mb = pd.DataFrame()
+    df_freesurfer = pd.DataFrame()
+    df_lesion = pd.DataFrame()
 
 
 
@@ -1095,4 +1109,130 @@ class ClipPercentilesD(mn.transforms.MapTransform):
             else:
                 img_t = self._normalize(img=img_t)
             d[key] = convert_to_dst_type(img_t, dst=img)[0]
+        return d
+
+
+class ZeroBackgroundD(mn.transforms.MapTransform):
+    """
+    Zero out background voxels using a mask.
+
+    This is important for BIDS data which may have non-zero values outside
+    the brain mask, which can cause training instability when not using --mask flag.
+
+    Args:
+        keys: keys of the data to zero out (e.g., ["label"])
+        mask_key: key containing the mask (default: "mask")
+        allow_missing_keys: don't raise exception if key is missing.
+    """
+
+    def __init__(
+        self,
+        keys,
+        mask_key: str = "mask",
+        allow_missing_keys: bool = False,
+    ) -> None:
+        super().__init__(keys, allow_missing_keys)
+        self.mask_key = mask_key
+
+    def __call__(self, data):
+        d = dict(data)
+
+        if self.mask_key not in d:
+            return d
+
+        mask = d[self.mask_key]
+        mask = convert_to_tensor(mask, track_meta=get_track_meta())
+
+        for key in self.key_iterator(d):
+            img = d[key]
+            img = convert_to_tensor(img, track_meta=get_track_meta())
+
+            # Zero out background (where mask == 0)
+            # Expand mask to match image channels if needed
+            if mask.ndim == 3 and img.ndim == 4:
+                # mask is (H,W,D), img is (C,H,W,D)
+                mask_expanded = mask.unsqueeze(0)  # (1,H,W,D)
+            elif mask.ndim == 4 and mask.shape[0] == 1:
+                # mask is already (1,H,W,D)
+                mask_expanded = mask
+            else:
+                mask_expanded = mask
+
+            # Apply mask
+            img_masked = img * (mask_expanded > 0)
+
+            d[key] = convert_to_dst_type(img_masked, dst=img)[0]
+
+        return d
+
+
+class ScaleBIDSqMRID(mn.transforms.MapTransform):
+    """
+    Scale BIDS qMRI data to match HEALTHY/STROKE data units AND clip to match distribution.
+
+    BIDS data uses different units/scaling:
+    - PD: needs to be scaled by 100
+    - R1: needs to be scaled by 1/1000 (convert from ms^-1 to s^-1), then clipped to match H/S range
+    - R2*: clip negative values
+    - MT: clip negative values
+
+    The clipping is needed because BIDS has a tighter distribution than HEALTHY/STROKE,
+    and the model was trained on the noisier HEALTHY/STROKE distribution.
+
+    Args:
+        keys: keys of the corresponding items to be transformed (e.g., ["label"])
+        path_key: key containing the file path to detect BIDS data (default: "path")
+        allow_missing_keys: don't raise exception if key is missing.
+    """
+
+    def __init__(
+        self,
+        keys,
+        path_key: str = "path",
+        allow_missing_keys: bool = False,
+    ) -> None:
+        super().__init__(keys, allow_missing_keys)
+        self.path_key = path_key
+
+    def _is_bids_data(self, data):
+        """Check if data comes from BIDS dataset based on file path"""
+        if self.path_key not in data:
+            return False
+
+        path = data[self.path_key]
+        # Handle different path formats
+        if isinstance(path, (list, tuple)):
+            path = path[0] if len(path) > 0 else ""
+        path_str = str(path)
+
+        # Check if path contains BIDS directory structure
+        return "/BIDS/" in path_str or "\\BIDS\\" in path_str
+
+    def __call__(self, data):
+        d = dict(data)
+
+        # Only apply scaling if this is BIDS data
+        if not self._is_bids_data(d):
+            return d
+
+        for key in self.key_iterator(d):
+            img = d[key]
+            img = convert_to_tensor(img, track_meta=get_track_meta())
+
+            # Apply channel-specific scaling
+            # Assuming channel order: [PD, R1, R2*, MT]
+            if img.shape[0] >= 4:  # Ensure we have at least 4 channels
+                img_scaled = img.clone()
+                img_scaled[0] = img[0] * 100.0      # PD: scale by 100
+                img_scaled[1] = img[1] / 1000.0     # R1: convert ms^-1 to s^-1
+
+                # Clip R2* and MT to remove negative values (unphysical)
+                img_scaled[2] = torch.clamp(img[2], min=0)  # R2*: clip negative values
+                img_scaled[3] = torch.clamp(img[3], min=0)  # MT: clip negative values
+
+                d[key] = convert_to_dst_type(img_scaled, dst=img)[0]
+            else:
+                # If unexpected number of channels, don't scale
+                d[key] = img
+
         return d

@@ -31,13 +31,18 @@ warnings.filterwarnings(
 
 def activate(x):
     # apply activation function to match postproc in nitorch qmri
-    x[:, 0] = x[:, 0].exp()  # pd = e^f(x)
-    x[:, 1] = x[:, 1].exp()  # r1 = e^f(x)
-    x[:, 2] = x[:, 2].exp()  # r2 = e^f(x)
-    x[:, 3] = x[:, 3].neg().exp().add(1).reciprocal().mul(100)  # mt = 100/(1+e^-f(x))
-    x[:, 1] = x[:, 1] / 10
-    x[:, 2] = x[:, 2] / 10
-    return x
+    # Clip logits to prevent extreme values: exp(-10) ≈ 4.5e-5 (effectively zero)
+    # Create new tensor to avoid in-place operations that break autograd
+    result = torch.zeros_like(x)
+    result[:, 0] = torch.clamp(x[:, 0], min=-10, max=12).exp()  # pd = e^f(x)
+    result[:, 1] = torch.clamp(x[:, 1], min=-10, max=12).exp() / 10  # r1 = e^f(x) / 10
+    result[:, 2] = torch.clamp(x[:, 2], min=-10, max=12).exp() / 10  # r2 = e^f(x) / 10
+    result[:, 3] = x[:, 3].neg().exp().add(1).reciprocal().mul(100)  # mt = 100/(1+e^-f(x))
+    return result
+
+
+# Minimum output value due to logit clipping - add to targets to match model's lower bound
+OUTPUT_EPSILON = 4.5e-5
 
 
 seed(786)
@@ -59,18 +64,18 @@ def get_loaders(
     lowres=False,
     only_stroke=False,
 ):
-    if only_stroke:
-        train_files = glob.glob(
-            os.path.join("/PATH/TO/STROKE_QMRI/*/masked_pd.nii"),
+    # Get HEALTHY/STROKE data (legacy format)
+    healthy_stroke_files = []
+    if not only_stroke:
+        healthy_stroke_files += glob.glob(
+            os.path.join(os.path.expanduser("~/MPM_DATA/HEALTHY/*/masked_pd.nii"))
         )
-    else:
-        train_files = glob.glob(
-            os.path.join("/PATH/TO/STROKE_QMRI/*/masked_pd.nii"),
-        ) + glob.glob(
-            os.path.join("/PATH/TO/HEALTHY_QMRI/*/masked_pd.nii"),
-        )
+    healthy_stroke_files += glob.glob(
+        os.path.join(os.path.expanduser("~/MPM_DATA/STROKE/*/masked_pd.nii"))
+    )
 
-    train_dict = [
+    # Create dictionaries for HEALTHY/STROKE data
+    healthy_stroke_dict = [
         {
             "label": [
                 f,
@@ -80,15 +85,49 @@ def get_loaders(
             ],
             "mask": f.replace("masked_pd.nii", "mask.nii"),
         }
-        for f in train_files
+        for f in healthy_stroke_files
     ]
 
-    shuffle(train_dict)
+    # Get BIDS data (new format) - include both anat/ and skullstrip/ versions
+    bids_root = os.path.expanduser("~/MPM_DATA/BIDS")
+    bids_subjects = sorted(glob.glob(os.path.join(bids_root, "sub-*")))
 
-    train_dict, val_dict = (
-        train_dict[:-5],
-        train_dict[-5:],
-    )
+    # Create dictionaries for BIDS data
+    bids_dict = []
+    for subj_dir in bids_subjects:
+        subj_id = os.path.basename(subj_dir)
+        samseg_dir = os.path.join(subj_dir, "samseg")
+        mask_file = os.path.join(samseg_dir, f"{subj_id}_desc-brain_mask.nii.gz")
+
+        # Try both anat/ and skullstrip/ subdirectories
+        for data_dir_name in ["anat", "skullstrip"]:
+            data_dir = os.path.join(subj_dir, data_dir_name)
+
+            pd_file = os.path.join(data_dir, f"{subj_id}_space-MNI152NLin6Asym_PDmap.nii.gz")
+            r1_file = os.path.join(data_dir, f"{subj_id}_space-MNI152NLin6Asym_R1map.nii.gz")
+            r2s_file = os.path.join(data_dir, f"{subj_id}_space-MNI152NLin6Asym_R2starmap.nii.gz")
+            mt_file = os.path.join(data_dir, f"{subj_id}_space-MNI152NLin6Asym_MTsat.nii.gz")
+
+            # Only add if all files exist
+            if all(os.path.exists(f) for f in [pd_file, r1_file, r2s_file, mt_file, mask_file]):
+                bids_dict.append({
+                    "label": [pd_file, r1_file, r2s_file, mt_file],
+                    "mask": mask_file,
+                })
+
+    # Split HEALTHY/STROKE for validation (keep validation consistent with original training)
+    print(f"Found {len(healthy_stroke_dict)} HEALTHY/STROKE subjects and {len(bids_dict)} BIDS samples (anat + skullstrip)")
+
+    shuffle(healthy_stroke_dict)  # Shuffle HEALTHY/STROKE before split
+    val_dict = healthy_stroke_dict[-5:]  # Last 5 HEALTHY/STROKE for validation
+    train_healthy_stroke = healthy_stroke_dict[:-5]  # Rest of HEALTHY/STROKE for training
+
+    # Combine training data: HEALTHY/STROKE (minus val) + all BIDS
+    train_dict = train_healthy_stroke + bids_dict
+    shuffle(train_dict)  # Shuffle combined training set
+
+    print(f"Train set: {len(train_dict)} samples ({len(train_healthy_stroke)} HEALTHY/STROKE + {len(bids_dict)} BIDS)")
+    print(f"Val set: {len(val_dict)} samples (HEALTHY/STROKE only)")
 
     ptch = 96 if lowres else 192
 
@@ -97,6 +136,10 @@ def get_loaders(
             mn.transforms.CopyItemsD(keys=["label"], names=["path"]),
             mn.transforms.LoadImageD(keys=["label", "mask"], image_only=True),
             mn.transforms.EnsureChannelFirstD(keys=["label", "mask"]),
+            # Scale BIDS data to match HEALTHY/STROKE units (must be before other processing)
+            custom_cc.ScaleBIDSqMRID(keys=["label"], path_key="path"),
+            # Zero out background to prevent non-zero values from causing NaNs in non-masked training
+            custom_cc.ZeroBackgroundD(keys=["label"], mask_key="mask"),
             mn.transforms.ResizeWithPadOrCropD(
                 keys=["label", "mask"], spatial_size=(256, 256, 256)
             ),
@@ -315,9 +358,30 @@ def run_model(args, device, train_loader, val_loader, train_transform):
 
     # Try to load most recent weight
     if args.resume or args.resume_best:
-        model.load_state_dict(
-            checkpoint["net"], strict=False
-        )  # strict False in case of switch between subpixel and transpose
+        result = model.load_state_dict(
+            checkpoint["net"], strict=True
+        )  # Strict loading to ensure all weights match
+
+        # VERBOSE: Report what was loaded
+        if len(result.missing_keys) > 0:
+            print(f"⚠️  WARNING: {len(result.missing_keys)} keys missing from checkpoint (using random init for these):")
+            for key in result.missing_keys[:5]:
+                print(f"     - {key}")
+            if len(result.missing_keys) > 5:
+                print(f"     ... and {len(result.missing_keys)-5} more")
+
+        if len(result.unexpected_keys) > 0:
+            print(f"⚠️  WARNING: {len(result.unexpected_keys)} unexpected keys in checkpoint (ignoring these):")
+            for key in result.unexpected_keys[:5]:
+                print(f"     - {key}")
+            if len(result.unexpected_keys) > 5:
+                print(f"     ... and {len(result.unexpected_keys)-5} more")
+
+        if len(result.missing_keys) == 0 and len(result.unexpected_keys) == 0:
+            print(f"✅ Successfully loaded all {len(checkpoint['net'])} weight tensors from checkpoint")
+        else:
+            print(f"⚠️  Checkpoint loaded with mismatches! Model may not be properly initialized!")
+
         if not args.reset_training:
             opt.load_state_dict(checkpoint["opt"])
             start_epoch = checkpoint["epoch"] + 1
@@ -408,7 +472,7 @@ def run_model(args, device, train_loader, val_loader, train_transform):
                 train_iter = iter(train_loader)
                 batch = next(train_iter)
             images = batch["image"].to(device)
-            target = batch["mpm"].to(images)
+            target = batch["mpm"].to(images) + OUTPUT_EPSILON  # Add epsilon to match model's lower bound
             mask = batch["mask"].to(device)
             params = batch["params"].to(images)
             if (params > 1).sum().item() > 0:
@@ -514,7 +578,7 @@ def run_model(args, device, train_loader, val_loader, train_transform):
             with torch.no_grad():
                 for val_step, batch in enumerate(val_loader):
                     images = batch["image"].to(device)
-                    target = batch["mpm"].to(images)
+                    target = batch["mpm"].to(images) + OUTPUT_EPSILON  # Add epsilon to match model's lower bound
                     params = batch["params"].to(images)
                     mask = batch["mask"].to(device)
                     if args.amp:
