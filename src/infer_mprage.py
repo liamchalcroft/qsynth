@@ -11,13 +11,14 @@ import glob
 
 def activate(x):
     # apply activation function to match postproc in nitorch qmri
-    x[:, 0] = x[:, 0].exp()  # pd = e^f(x)
-    x[:, 1] = x[:, 1].exp()  # r1 = e^f(x)
-    x[:, 2] = x[:, 2].exp()  # r2 = e^f(x)
-    x[:, 3] = x[:, 3].neg().exp().add(1).reciprocal().mul(100)  # mt = 100/(1+e^-f(x))
-    x[:, 1] = x[:, 1] / 10
-    x[:, 2] = x[:, 2] / 10
-    return x
+    # Clip logits to prevent extreme values: exp(-10) ≈ 4.5e-5 (effectively zero)
+    # Create new tensor to avoid in-place operations that break autograd
+    result = torch.zeros_like(x)
+    result[:, 0] = torch.clamp(x[:, 0], min=-10, max=12).exp()  # pd = e^f(x)
+    result[:, 1] = torch.clamp(x[:, 1], min=-10, max=12).exp() / 10  # r1 = e^f(x) / 10
+    result[:, 2] = torch.clamp(x[:, 2], min=-10, max=12).exp() / 10  # r2 = e^f(x) / 10
+    result[:, 3] = x[:, 3].neg().exp().add(1).reciprocal().mul(100)  # mt = 100/(1+e^-f(x))
+    return result
 
 
 def run_model(args, device):
